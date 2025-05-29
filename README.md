@@ -69,3 +69,50 @@ Customer_Propensity/
 │
 └── README.md
 ```
+
+## Project Workflow: Customer Propensity Modeling Pipeline
+
+| Stage                | Description                                                                 | Key Tools / Scripts / Directories                           |
+|----------------------|-----------------------------------------------------------------------------|--------------------------------------------------------------|
+| **1. Data Ingestion**| Collect raw and external data from databases, APIs, and third-party sources using PySpark for distributed loading and schema inference | `1_data_ingestion/`<br>- `data_ingest.py` (uses PySpark)<br>- `db_connections.json` |
+| **2. Data Processing**| Clean, merge, and engineer features (lagged stats, transforms) using PySpark DataFrames and SQL functions for scalable prep | `2_data_processing/`<br>- `clean_merge.py` (PySpark)<br>- `feature_engineering.py` (PySpark)<br>- `eda_notebooks/` |
+| **3. Modeling - Churn**| Train and evaluate churn prediction model with explainability (SHAP)       | `3_modeling/churn_prediction/`<br>- `train_xgboost.py`<br>- `evaluate.py`<br>- `metrics_report.py` |
+| **4. Modeling - Segmentation**| Segment customers based on model outputs and engineered features | `3_modeling/segmentation/`<br>- `embedding.py`<br>- `clustering.py`<br>- `interpretation.py` |
+| **5. API Service**    | Deploy model predictions and insights via FastAPI endpoints                | `4_api_service/app/`<br>- `main.py`<br>- `models/`<br>- `utils/` |
+| **6. Reporting**      | Generate performance reports and segment summaries                         | `5_reports/`<br>- `model_performance_churn.pdf`<br>- `segment_summary_report.pdf` |
+| **7. Dashboard**      | Visualize trends, segments, and key statistics in UI                       | `6_dashboard/`<br>- Dash/Streamlit or Tableau embedded apps |
+| **8. Deployment (SageMaker)**| Train and deploy models in scalable environments                     | `7_sagemaker_container/`<br>- `train_script.py`<br>- `inference_script.py`<br>- `Dockerfile` |
+| **9. Utilities & Configs**| Manage global settings and logging infrastructure   
+
+## Tech Stack (Tentative)
+
+This project combines scalable data processing, machine learning, and model deployment in a modular pipeline.
+
+### Data Layer
+- **Apache Spark (PySpark)** – Distributed data ingestion, cleaning, and feature engineering
+- **PostgreSQL / S3** – Structured and unstructured data sources (pending)
+- **JSON Configs** – Database credentials, environment flags
+
+### Modeling & ML
+- **XGBoost** – Baseline churn prediction model
+- **SHAP** – Model explainability and feature attribution
+- **UMAP** – Dimensionality reduction for customer embeddings
+- **HDBSCAN** – Customer segmentation
+- **Scikit-learn** – Utilities for preprocessing, evaluation
+
+### Deployment & Serving
+- **Amazon SageMaker** – Training and scalable deployment of ML models
+- **FastAPI** – REST API for exposing predictions and customer segment insights
+- **Docker** – Containerized model and inference environments
+
+### Visualization & Reporting
+- **Dash** – Interactive dashboards
+- **Matplotlib / Seaborn / Plotly** – EDA and report visuals
+- **PDF Reports** – Auto-generated summaries for stakeholders
+
+### Development & Utilities
+- **Pytest** – API and model test coverage
+- **Logging & Monitoring** – Custom `logger.py`, integration with SageMaker logging
+- **VS Code / Jupyter Notebooks** – Development and exploration
+
+> _Note: This stack is expected to evolve based on project needs (e.g., cloud data warehouses, CI/CD tooling, feature store integration)._
