@@ -1,4 +1,4 @@
-# Customer Propensity
+# Customer Propensity Pipeline
 
 Repository for a customer propensity modeling pipeline leveraging Apache Spark (PySpark), Amazon SageMaker, and API endpoints to deliver actionable business insights.
 The initial focus is on churn prediction, using SHAP values to explain model outputs and inform customer segmentation. These enriched customer profiles will support the development of a next-best-offer model.
@@ -70,7 +70,7 @@ Customer_Propensity/
 └── README.md
 ```
 
-## Project Workflow: Customer Propensity Modeling Pipeline
+## Project Workflow
 
 | Stage                | Description                                                                 | Key Tools / Scripts / Directories                           |
 |----------------------|-----------------------------------------------------------------------------|--------------------------------------------------------------|
