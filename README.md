@@ -89,30 +89,30 @@ Customer_Propensity/
 This project combines scalable data processing, machine learning, and model deployment in a modular pipeline.
 
 ### Data Layer
-- **Apache Spark (PySpark)** – Distributed data ingestion, cleaning, and feature engineering
-- **PostgreSQL / S3** – Structured and unstructured data sources (pending)
-- **JSON Configs** – Database credentials, environment flags
+- **Apache Spark (PySpark)** - Distributed data ingestion, cleaning, and feature engineering
+- **PostgreSQL / S3** - Structured and unstructured data sources (pending)
+- **JSON Configs** - Database credentials, environment flags
 
 ### Modeling & ML
-- **XGBoost** – Baseline churn prediction model
-- **SHAP** – Model explainability and feature attribution
-- **UMAP** – Dimensionality reduction for customer embeddings
-- **HDBSCAN** – Customer segmentation
-- **Scikit-learn** – Utilities for preprocessing, evaluation
+- **XGBoost** - Baseline churn prediction model
+- **SHAP** - Model explainability and feature attribution
+- **UMAP** - Dimensionality reduction for customer embeddings
+- **HDBSCAN** - Customer segmentation via clustering
+- **Scikit-learn** - Utilities for preprocessing, evaluation
 
 ### Deployment & Serving
-- **Amazon SageMaker** – Training and scalable deployment of ML models
-- **FastAPI** – REST API for exposing predictions and customer segment insights
-- **Docker** – Containerized model and inference environments
+- **Amazon SageMaker** - Training and scalable deployment of ML models
+- **FastAPI** - REST API for exposing predictions and customer segment insights
+- **Docker** - Containerized model and inference environments
 
 ### Visualization & Reporting
-- **Dash** – Interactive dashboards
-- **Matplotlib / Seaborn / Plotly** – EDA and report visuals
-- **PDF Reports** – Auto-generated summaries for stakeholders
+- **Dash** - Interactive dashboards
+- **Matplotlib / Seaborn / Plotly** - EDA and report visuals
+- **PDF Reports** - Auto-generated summaries for stakeholders
 
 ### Development & Utilities
-- **Pytest** – API and model test coverage
-- **Logging & Monitoring** – Custom `logger.py`, integration with SageMaker logging
-- **VS Code / Jupyter Notebooks** – Development and exploration
+- **Pytest** - API and model test coverage
+- **Logging & Monitoring** - Custom `logger.py`, integration with SageMaker logging
+- **VS Code / Jupyter Notebooks** - Development and exploration
 
 > _Note: This stack is expected to evolve based on project needs (e.g., cloud data warehouses, CI/CD tooling, feature store integration)._
