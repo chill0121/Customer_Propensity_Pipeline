@@ -1,4 +1,4 @@
 .DS_Store
 .vscode
 .vscode/settings.json
-/data_ingestion/raw/instacart_basket.zip
+/data_ingestion/raw/*
