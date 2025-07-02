@@ -274,8 +274,12 @@ transaction_df = transaction_df.drop('churned_customer', axis=1)
 customer_df = customer_df.drop('income_bracket', axis=1)
 churn_df = churn_df.drop(['last_tx_date', 'days_since_last_tx'], axis=1)
 
+# Convert datetime columns to microsecond precision to be compatible with Spark
+transaction_df['timestamp'] = transaction_df['timestamp'].astype('datetime64[us]')
+interaction_df['timestamp'] = interaction_df['timestamp'].astype('datetime64[us]')
+
 # Save as Parquet for PySpark
-save_dir = Path("..") / "raw"
+save_dir = Path(__file__).resolve().parent.parent / "raw"
 save_dir.mkdir(exist_ok=True)
 
 customer_df.to_parquet(save_dir / "customers.parquet", index=False)
