@@ -1,4 +1,5 @@
 .DS_Store
 .vscode
 .vscode/settings.json
-/data_ingestion/raw/*
+/data/raw/*
+/data/processed/*
