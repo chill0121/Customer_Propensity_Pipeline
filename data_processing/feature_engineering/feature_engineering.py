@@ -295,7 +295,7 @@ class CreditUnionFeatureEngineering:
             .when(col("age") < 65, "50-64")
             .otherwise("65+")
         # ).withColumn(
-        #     # Income estimation (since we removed income_bracket)
+        #     # Income estimation
         #     "estimated_income_tier",
         #     when(col("city").isin(["New York", "San Francisco", "Seattle"]), "high")
         #     .when(col("city").isin(["Los Angeles", "Chicago", "Boston"]), "medium-high")
@@ -400,45 +400,71 @@ class CreditUnionFeatureEngineering:
         return combined_snapshots
     
     def create_feature_store_dataset(self,
-                                   customer_360_df: DataFrame,
-                                   churn_df: DataFrame,
-                                   prediction_horizon_days: int = 30) -> DataFrame:
+                                       customer_360_df: DataFrame,
+                                       churn_df: DataFrame,
+                                       transaction_df: DataFrame,
+                                       prediction_horizon_days: int = 30) -> DataFrame:
         """
-        Create feature store dataset with target variable for ML models
+        Create feature store using transaction recency to define churn timing
+        
+        This method uses the last transaction date to simulate when customers actually churned,
+        then creates proper point-in-time labels for training.
         """
         
-        # Prepare churn labels with prediction horizon
-        churn_labels = churn_df.withColumn(
-            "churn_prediction_date",
-            date_sub(col("churn_date"), prediction_horizon_days)
-        ).select(
-            col("customer_id"),
-            col("churn_prediction_date").alias("snapshot_date"),
-            lit(1).alias("will_churn_30d"),
-            col("churn_date"),
-            col("churn_reason")
+        # For churned customers, find their last transaction date
+        churned_customers = churn_df.filter(col("churned") == 1).select("customer_id")
+        
+        # Get last transaction date for each customer
+        last_transactions = transaction_df.groupBy("customer_id").agg(
+            max("timestamp").alias("last_transaction_date")
         )
         
-        # Join features with churn labels
+        # For churned customers, assume they churned shortly after their last transaction
+        churned_with_dates = churned_customers.join(
+            last_transactions, 
+            on="customer_id", 
+            how="inner"
+        ).withColumn(
+            "estimated_churn_date",
+            date_add(col("last_transaction_date"), 15)  # Assume churn 15 days after last transaction
+        )
+        
+        # Create point-in-time labels
+        # Label customers as "will_churn" for snapshots that are prediction_horizon_days before churn
+        churn_labels = churned_with_dates.withColumn(
+            "label_date",
+            date_sub(col("estimated_churn_date"), prediction_horizon_days)
+        ).select(
+            col("customer_id"),
+            col("label_date").alias("snapshot_date"),
+            lit(1).alias("will_churn_30d"),
+            col("estimated_churn_date").alias("churn_date")
+        )
+        
+        # Only keep labels that fall within our snapshot date range
+        snapshot_dates = customer_360_df.select("snapshot_date").distinct()
+        valid_churn_labels = churn_labels.join(
+            snapshot_dates,
+            on="snapshot_date",
+            how="inner"
+        )
+        
+        # Join with customer 360 features
         feature_store = customer_360_df.join(
-            churn_labels,
+            valid_churn_labels,
             on=["customer_id", "snapshot_date"],
             how="left"
         ).fillna({"will_churn_30d": 0})
         
-        # Add feature versioning
+        # Add metadata
         feature_store = feature_store.withColumn(
-            "feature_version",
-            lit("v1.0")
+            "feature_version", lit("v2.0")
         ).withColumn(
-            "created_timestamp",
-            current_timestamp()
-        )
-        
-        # Ensure proper data types for ML
-        feature_store = feature_store.withColumn(
-            "will_churn_30d",
-            col("will_churn_30d").cast(IntegerType())
+            "created_timestamp", current_timestamp()
+        ).withColumn(
+            "prediction_horizon_days", lit(prediction_horizon_days)
+        ).withColumn(
+            "will_churn_30d", col("will_churn_30d").cast(IntegerType())
         )
         
         return feature_store
@@ -482,6 +508,7 @@ def run_feature_engineering_pipeline(spark: SparkSession,
     feature_store = fe.create_feature_store_dataset(
         customer_360_df=snapshots,
         churn_df=data_dict["churn"],
+        transaction_df=data_dict['transactions'],
         prediction_horizon_days=30
     )
     
@@ -498,13 +525,13 @@ def run_feature_engineering_pipeline(spark: SparkSession,
     return feature_store, snapshots
 
 # Utility functions for loading saved data
-def load_customer_360(spark: SparkSession, data_path: str = PROCESSED_PATH / "customer_360") -> DataFrame:
+def load_customer_360(spark: SparkSession, data_path: str = str(PROCESSED_PATH / "customer_360")) -> DataFrame:
     """
     Load saved customer 360 snapshots from parquet
     """
     return spark.read.parquet(data_path)
 
-def load_feature_store(spark: SparkSession, data_path: str = PROCESSED_PATH / "feature_store") -> DataFrame:
+def load_feature_store(spark: SparkSession, data_path: str = str(PROCESSED_PATH / "feature_store")) -> DataFrame:
     """
     Load saved feature store from parquet
     """
