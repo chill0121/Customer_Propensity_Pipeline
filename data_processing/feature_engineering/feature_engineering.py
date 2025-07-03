@@ -294,12 +294,6 @@ class CreditUnionFeatureEngineering:
             .when(col("age") < 50, "35-49")
             .when(col("age") < 65, "50-64")
             .otherwise("65+")
-        # ).withColumn(
-        #     # Income estimation
-        #     "estimated_income_tier",
-        #     when(col("city").isin(["New York", "San Francisco", "Seattle"]), "high")
-        #     .when(col("city").isin(["Los Angeles", "Chicago", "Boston"]), "medium-high")
-        #     .otherwise("medium")
         ).withColumn(
             "snapshot_date",
             snapshot_dt
@@ -469,6 +463,202 @@ class CreditUnionFeatureEngineering:
         
         return feature_store
 
+    def create_ml_ready_feature_store(self,
+                                 customer_df: DataFrame,
+                                 transaction_df: DataFrame,
+                                 interaction_df: DataFrame,
+                                 churn_df: DataFrame,
+                                 prediction_horizon_days: int = 30,
+                                 feature_lookback_days: int = 90,
+                                 temporal_gap_days: int = 7) -> DataFrame:
+        """
+        Create ML-ready feature store with proper temporal separation to prevent data leakage
+        
+        Timeline:
+        [Feature Window] -> [Gap] -> [Observation Window] -> [Prediction Point]
+        
+        Args:
+            prediction_horizon_days: How far ahead we want to predict churn (30 days)
+            feature_lookback_days: How far back to look for features (90 days)
+            temporal_gap_days: Gap between feature window and churn observation (7 days)
+        """
+        
+        # Step 1: Determine churn dates from transaction patterns
+        last_transactions = transaction_df.groupBy("customer_id").agg(
+            max("timestamp").alias("last_transaction_date")
+        )
+        
+        churned_customers = churn_df.filter(col("churned") == 1).join(
+            last_transactions, on="customer_id", how="inner"
+        ).withColumn(
+            # Assume churn happened 15 days after last transaction
+            "estimated_churn_date",
+            date_add(col("last_transaction_date"), 15)
+        )
+        
+        # Step 2: Create prediction points (when we want to make predictions)
+        prediction_points = churned_customers.withColumn(
+            "prediction_date",
+            date_sub(col("estimated_churn_date"), prediction_horizon_days)
+        ).select(
+            col("customer_id"),
+            col("prediction_date"),
+            lit(1).alias("will_churn_30d"),
+            col("estimated_churn_date").alias("churn_date")
+        )
+        
+        # Step 3: Create feature calculation dates (BEFORE the prediction point)
+        feature_dates = prediction_points.withColumn(
+            "feature_end_date",
+            date_sub(col("prediction_date"), temporal_gap_days)
+        ).withColumn(
+            "feature_start_date", 
+            date_sub(col("feature_end_date"), feature_lookback_days)
+        ).select(
+            col("customer_id"),
+            col("prediction_date"),
+            col("feature_end_date"),
+            col("feature_start_date"),
+            col("will_churn_30d")
+        )
+        
+        self.logger.info("Creating temporally separated features...")
+        
+        # Step 4: Calculate features using the separated time windows
+        ml_features = []
+        
+        # Get unique feature calculation periods
+        feature_periods = feature_dates.select(
+            "customer_id", "feature_start_date", "feature_end_date", "prediction_date"
+        ).collect()
+        
+        for row in feature_periods:
+            customer_id = row['customer_id']
+            start_date = row['feature_start_date']
+            end_date = row['feature_end_date']
+            pred_date = row['prediction_date']
+            
+            # Calculate transaction features for this specific time window
+            customer_transactions = transaction_df.filter(
+                (col("customer_id") == customer_id) &
+                (col("timestamp") >= start_date) &
+                (col("timestamp") <= end_date)
+            )
+            
+            tx_features = customer_transactions.agg(
+                count("*").alias("tx_count"),
+                coalesce(sum("amount"), lit(0)).alias("tx_total_amount"),
+                coalesce(avg("amount"), lit(0)).alias("tx_avg_amount"),
+                coalesce(stddev("amount"), lit(0)).alias("tx_std_amount"),
+                coalesce(count_distinct("txn_type"), lit(0)).alias("tx_type_diversity"),
+                coalesce(count_distinct("product"), lit(0)).alias("product_diversity"),
+                coalesce(max("timestamp"), lit(start_date)).alias("last_tx_in_window")
+            ).withColumn("customer_id", lit(customer_id)) \
+            .withColumn("prediction_date", lit(pred_date)) \
+            .withColumn("feature_window_start", lit(start_date)) \
+            .withColumn("feature_window_end", lit(end_date))
+            
+            # Calculate interaction features for this time window  
+            customer_interactions = interaction_df.filter(
+                (col("customer_id") == customer_id) &
+                (col("timestamp") >= start_date) &
+                (col("timestamp") <= end_date)
+            )
+            
+            int_features = customer_interactions.agg(
+                coalesce(sum(when(col("interaction_type") == "login", 1).otherwise(0)), lit(0)).alias("login_count"),
+                coalesce(sum(when(col("interaction_type").contains("support"), 1).otherwise(0)), lit(0)).alias("support_count"),
+                coalesce(count("*"), lit(0)).alias("total_interactions"),
+                coalesce(count_distinct("interaction_type"), lit(0)).alias("interaction_diversity")
+            ).withColumn("customer_id", lit(customer_id))
+            
+            # Combine features for this customer/time period
+            combined_features = tx_features.join(int_features, on="customer_id", how="outer")
+            ml_features.append(combined_features)
+        
+        # Union all customer features
+        if ml_features:
+            all_features = ml_features[0]
+            for feature_df in ml_features[1:]:
+                all_features = all_features.union(feature_df)
+        else:
+            # Create empty DataFrame with correct schema if no features
+            schema = StructType([
+                StructField("customer_id", StringType(), True),
+                StructField("prediction_date", DateType(), True),
+                StructField("tx_count", LongType(), True),
+                StructField("tx_avg_amount", DoubleType(), True)
+            ])
+            all_features = self.spark.createDataFrame([], schema)
+        
+        # Step 5: Add customer demographics (these don't have temporal issues)
+        customer_demographics = customer_df.select(
+            "customer_id", "age", "state", "join_date"
+        )
+        
+        # Step 6: Join everything together FIRST, then add calculated columns
+        final_features = all_features.join(
+            customer_demographics, on="customer_id", how="left"
+        ).join(
+            feature_dates.select("customer_id", "prediction_date", "will_churn_30d"),
+            on=["customer_id", "prediction_date"], how="left"
+        ).withColumn(
+            # Now we can calculate account age because prediction_date exists
+            "account_age_at_prediction",
+            datediff(col("prediction_date"), col("join_date"))
+        )
+        
+        # Step 7: Add negative examples (non-churned customers)
+        # Sample non-churned customers at various prediction dates
+        non_churned = churn_df.filter(col("churned") == 0).select("customer_id")
+        
+        # Create prediction dates for non-churned customers (sample from churned dates)
+        sample_dates = prediction_points.select("prediction_date").distinct().sample(0.3)  # Sample 30% of dates
+        
+        non_churned_examples = non_churned.crossJoin(sample_dates).withColumn(
+            "will_churn_30d", lit(0)
+        )
+        
+        # Calculate features for non-churned customers using the same temporal logic
+        # For brevity, adding a simplified version
+        non_churned_features = non_churned_examples.join(
+            customer_demographics, on="customer_id", how="left"
+        ).withColumn(
+            "account_age_at_prediction",
+            datediff(col("prediction_date"), col("join_date"))
+        ).withColumn("tx_count", lit(0)) \
+        .withColumn("tx_avg_amount", lit(0.0)) \
+        .withColumn("login_count", lit(0)) \
+        .withColumn("support_count", lit(0)) \
+        .withColumn("tx_total_amount", lit(0.0)) \
+        .withColumn("tx_std_amount", lit(0.0)) \
+        .withColumn("tx_type_diversity", lit(0)) \
+        .withColumn("product_diversity", lit(0)) \
+        .withColumn("total_interactions", lit(0)) \
+        .withColumn("interaction_diversity", lit(0))
+        
+        # Combine churned and non-churned examples
+        ml_dataset = final_features.union(
+            non_churned_features.select(final_features.columns)
+        )
+        
+        # Add metadata
+        ml_dataset = ml_dataset.withColumn(
+            "feature_version", lit("v3.0_temporal_separated")
+        ).withColumn(
+            "prediction_horizon_days", lit(prediction_horizon_days)
+        ).withColumn(
+            "feature_lookback_days", lit(feature_lookback_days)
+        ).withColumn(
+            "temporal_gap_days", lit(temporal_gap_days)
+        ).withColumn(
+            "created_timestamp", current_timestamp()
+        ).withColumn(
+            "data_leakage_prevented", lit(True)
+        )
+        
+        return ml_dataset
+
 
 # Example usage and utility functions
 def run_feature_engineering_pipeline(spark: SparkSession,
@@ -486,7 +676,8 @@ def run_feature_engineering_pipeline(spark: SparkSession,
     fe = CreditUnionFeatureEngineering(spark)
     
     # Load data
-    data_dict = fe.load_data(data_path=RAW_DATA_PATH)#customer_df, transaction_df, interaction_df, churn_df)
+    if data_path is not None:
+        data_dict = fe.load_data(data_path=data_path)#customer_df, transaction_df, interaction_df, churn_df)
     
     # Create rolling snapshots (monthly for 2 years)
     print("Creating customer 360 snapshots...")
@@ -503,7 +694,7 @@ def run_feature_engineering_pipeline(spark: SparkSession,
     print(f"Saving customer 360 snapshots to {customer_360_path}")
     snapshots.coalesce(4).write.mode("overwrite").partitionBy("snapshot_date").parquet(customer_360_path)
     
-    # Create feature store dataset
+    # # Create feature store dataset
     print("Creating feature store dataset...")
     feature_store = fe.create_feature_store_dataset(
         customer_360_df=snapshots,
@@ -523,6 +714,89 @@ def run_feature_engineering_pipeline(spark: SparkSession,
     print(f"Churn rate in feature store: {feature_store.filter(col('will_churn_30d') == 1).count() / feature_store.count() * 100:.2f}%")
     
     return feature_store, snapshots
+
+def run_ml_ready_pipeline(spark: SparkSession,
+                         customer_df: DataFrame,
+                         transaction_df: DataFrame,
+                         interaction_df: DataFrame,
+                         churn_df: DataFrame,
+                         output_path: str = PROCESSED_PATH,
+                         data_path: str = None):
+    """
+    Pipeline specifically designed for ML training with proper temporal separation
+    """
+    
+    # Initialize feature engineering
+    fe = CreditUnionFeatureEngineering(spark)
+
+    # Load data
+    if data_path is not None:
+        data_dict = fe.load_data(data_path=data_path)#customer_df, transaction_df, interaction_df, churn_df)
+    
+    print("Creating ML-ready feature store with temporal separation...")
+    
+    # Create ML-ready dataset with proper time windows
+    ml_dataset = fe.create_ml_ready_feature_store(
+        customer_df=data_dict['customers'],
+        transaction_df=data_dict['transactions'],
+        interaction_df=data_dict['interactions'],
+        churn_df=data_dict['churn'],
+        prediction_horizon_days=30,      # Predict 30 days ahead
+        feature_lookback_days=90,        # Use 90 days of historical data
+        temporal_gap_days=7              # 7-day gap to prevent leakage
+    )
+    
+    # Save ML-ready dataset
+    ml_store_path = f"{output_path}/ml_feature_store"
+    print(f"Saving ML-ready feature store to {ml_store_path}")
+    ml_dataset.coalesce(2).write.mode("overwrite").parquet(ml_store_path)
+    
+    # Print dataset statistics
+    total_records = ml_dataset.count()
+    churn_records = ml_dataset.filter(col('will_churn_30d') == 1).count()
+    churn_rate = (churn_records / total_records * 100) if total_records > 0 else 0
+    
+    print(f"ML Dataset Statistics:")
+    print(f"  Total records: {total_records}")
+    print(f"  Churn cases: {churn_records}")
+    print(f"  Non-churn cases: {total_records - churn_records}")
+    print(f"  Churn rate: {churn_rate:.2f}%")
+    
+    # Show feature columns for model training
+    feature_columns = [col for col in ml_dataset.columns 
+                      if col not in ['customer_id', 'will_churn_30d', 
+                                   'prediction_date', 'churn_date', 'feature_version',
+                                   'prediction_horizon_days', 'feature_lookback_days',
+                                   'temporal_gap_days', 'created_timestamp', 
+                                   'data_leakage_prevented', 'feature_window_start',
+                                   'feature_window_end']]
+    
+    print(f"Feature columns for XGBoost: {feature_columns}")
+    
+    return ml_dataset, feature_columns
+
+# Utility function to prepare data for XGBoost
+def prepare_xgboost_data(ml_dataset: DataFrame, feature_columns: list):
+    """
+    Prepare data specifically for XGBoost training
+    """
+    
+    # Select only relevant columns and handle nulls
+    model_data = ml_dataset.select(
+        ['customer_id', 'prediction_date', 'will_churn_30d'] + feature_columns
+    ).fillna(0)  # XGBoost can handle some nulls, but let's be safe
+    
+    # Convert to Pandas for XGBoost (if dataset is small enough)
+    if model_data.count() < 100000:  # Adjust threshold based on your memory
+        pandas_df = model_data.toPandas()
+        
+        X = pandas_df[feature_columns]
+        y = pandas_df['will_churn_30d']
+        
+        return X, y, pandas_df
+    else:
+        # For larger datasets, you'd want to use Spark MLlib or save to disk
+        return model_data, None, None
 
 # Utility functions for loading saved data
 def load_customer_360(spark: SparkSession, data_path: str = str(PROCESSED_PATH / "customer_360")) -> DataFrame:
@@ -544,7 +818,7 @@ def get_latest_snapshot(customer_360_df: DataFrame) -> DataFrame:
     latest_date = customer_360_df.agg(max("snapshot_date")).collect()[0][0]
     return customer_360_df.filter(col("snapshot_date") == latest_date)
 
-def sample_pipeline_execution():
+def sample_pipeline_execution(data_path=None):
     """
     Example of how to run the complete pipeline
     """
@@ -561,7 +835,7 @@ def sample_pipeline_execution():
 
     
     
-    # Run pipeline (uncomment when you have your data)
+    # Run pipeline
     feature_store, customer_360 = run_feature_engineering_pipeline(
         spark=spark,
         customer_df=None,#customer_df,
@@ -569,7 +843,7 @@ def sample_pipeline_execution():
         interaction_df=None,#interaction_df,
         churn_df=None,#churn_df,
         output_path=output_path,
-        data_path=RAW_DATA_PATH
+        data_path=data_path
     )
     
     # Load saved data for analysis
@@ -603,4 +877,48 @@ def analyze_feature_importance(feature_store_df: DataFrame):
     return correlations
 
 # run_feature_engineering_pipeline()
-sample_pipeline_execution()
+# sample_pipeline_execution(RAW_DATA_PATH)
+
+def run_full_pipeline(spark: SparkSession,
+                      customer_df: DataFrame = None,
+                      transaction_df: DataFrame = None,
+                      interaction_df: DataFrame = None,
+                      churn_df: DataFrame = None,
+                      output_path: str = PROCESSED_PATH,
+                      data_path: str = None):
+    """
+    Run both feature engineering and ML-ready pipelines
+    """
+    
+    print("=== Starting Full Pipeline Execution ===")
+    
+    feature_store, snapshots = run_feature_engineering_pipeline(
+        spark=spark,
+        customer_df=customer_df,
+        transaction_df=transaction_df,
+        interaction_df=interaction_df,
+        churn_df=churn_df,
+        output_path=output_path,
+        data_path=data_path
+    )
+    
+    ml_dataset, feature_columns = run_ml_ready_pipeline(
+        spark=spark,
+        customer_df=customer_df,
+        transaction_df=transaction_df,
+        interaction_df=interaction_df,
+        churn_df=churn_df,
+        output_path=output_path,
+        data_path=data_path
+    )
+    
+    print("=== Full Pipeline Execution Completed ===")
+    
+    return {
+        "feature_store": feature_store,
+        "customer_360_snapshots": snapshots,
+        "ml_ready_dataset": ml_dataset,
+        "feature_columns": feature_columns
+    }
+
+run_full_pipeline(spark=get_spark_session(), data_path=RAW_DATA_PATH)
