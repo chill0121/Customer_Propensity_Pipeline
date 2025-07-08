@@ -12,7 +12,7 @@ from functools import reduce
 def get_spark_session():
     return SparkSession.builder \
         .appName("CreditUnionFeatureEngineering") \
-        .config("spark.driver.memory", "20g") \
+        .config("spark.driver.memory", "12g") \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
         .config("spark.sql.adaptive.skewJoin.enabled", "true") \
@@ -47,7 +47,6 @@ class CreditUnionFeatureEngineering:
                     'customers': self.spark.read.parquet(f"{data_path}/customers.parquet"),
                     'transactions': self.spark.read.parquet(f"{data_path}/transactions.parquet"),
                     'interactions': self.spark.read.parquet(f"{data_path}/interactions.parquet"),
-                    'churn': self.spark.read.parquet(f"{data_path}/churn_labels.parquet")
                 }
                 self.logger.info("Successfully loaded all parquet files")
             except Exception as e:
@@ -56,13 +55,11 @@ class CreditUnionFeatureEngineering:
         
         elif all(df is not None for df in [dataframes.get('customer_df'), 
                                           dataframes.get('transaction_df'),
-                                          dataframes.get('interaction_df'),
-                                          dataframes.get('churn_df')]):
+                                          dataframes.get('interaction_df')]):
             data_dict = {
                 'customers': dataframes['customer_df'],
                 'transactions': dataframes['transaction_df'],
                 'interactions': dataframes['interaction_df'],
-                'churn': dataframes['churn_df']
             }
             self.logger.info("Using pre-loaded DataFrames")
         
@@ -109,16 +106,10 @@ class CreditUnionFeatureEngineering:
             .when(col('age') < 65, 'Senior')
             .otherwise('Elderly'))
         
-        # Calculate tenure if join_date exists
-        if 'join_date' in customers.columns:
-            customers = customers.withColumn('tenure_days', 
-                datediff(current_date(), col('join_date')))
-        
         return {
             'customers': customers,
             'transactions': transactions,
             'interactions': interactions,
-            'churn': data_dict['churn']
         }
     
     def create_customer_360_snapshot(self, data_dict: dict[str, DataFrame], 
@@ -133,6 +124,11 @@ class CreditUnionFeatureEngineering:
         
         # Start with customer demographics
         customer_360 = data_dict['customers'].withColumn('snapshot_date', snapshot_ts)
+
+        # Calculate customer tenure
+        if 'join_date' in customer_360.columns:
+            customer_360 = customer_360.withColumn('tenure_days',
+                datediff(col('snapshot_date'), col('join_date')))
         
         # Add transaction features
         customer_360 = self._add_transaction_features(
@@ -155,135 +151,260 @@ class CreditUnionFeatureEngineering:
         
         return customer_360
     
-    def _add_transaction_features(self, customer_360: DataFrame, 
-                                transactions: DataFrame, 
-                                snapshot_date: datetime, 
-                                lookback_days: int) -> DataFrame:
-        """Add comprehensive transaction features"""
+    # def _add_transaction_features(self, customer_360: DataFrame, 
+    #                             transactions: DataFrame, 
+    #                             snapshot_date: datetime, 
+    #                             lookback_days: int) -> DataFrame:
+    #     """Add comprehensive transaction features"""
         
+    #     snapshot_ts = lit(snapshot_date)
+        
+    #     # Filter transactions within lookback window
+    #     tx_window = transactions.filter(
+    #         (col("tx_date") <= snapshot_ts) &
+    #         (col("tx_date") > date_sub(snapshot_ts, lookback_days))
+    #     )
+        
+    #     # Calculate transaction aggregations for multiple time windows
+    #     time_windows = [7, 30, 90]
+    #     tx_features = customer_360.select("customer_id", "snapshot_date")
+        
+    #     for window_days in time_windows:
+    #         window_suffix = f"_{window_days}d"
+            
+    #         tx_window_filtered = tx_window.filter(
+    #             col("tx_date") > date_sub(snapshot_ts, window_days)
+    #         )
+            
+    #         tx_agg = tx_window_filtered.groupBy("customer_id").agg(
+    #             # Volume metrics
+    #             count("*").alias(f"tx_count{window_suffix}"),
+    #             sum("amount").alias(f"tx_total_amount{window_suffix}"),
+    #             avg("amount").alias(f"avg_tx_amount{window_suffix}"),
+    #             stddev("amount").alias(f"std_tx_amount{window_suffix}"),
+    #             min("amount").alias(f"min_tx_amount{window_suffix}"),
+    #             max("amount").alias(f"max_tx_amount{window_suffix}"),
+                
+    #             # Debit/Credit patterns
+    #             sum(when(col("amount") < 0, -col("amount")).otherwise(0)).alias(f"total_debits{window_suffix}"),
+    #             sum(when(col("amount") > 0, col("amount")).otherwise(0)).alias(f"total_credits{window_suffix}"),
+    #             count(when(col("amount") < 0, 1)).alias(f"debit_count{window_suffix}"),
+    #             count(when(col("amount") > 0, 1)).alias(f"credit_count{window_suffix}"),
+                
+    #             # Diversity metrics
+    #             count_distinct("product").alias(f"product_diversity{window_suffix}"),
+    #             count_distinct("txn_type").alias(f"tx_type_diversity{window_suffix}"),
+    #             count_distinct("tx_date").alias(f"tx_active_days{window_suffix}"),
+                
+    #             # Timing metrics
+    #             max("tx_date").alias(f"last_tx_date{window_suffix}"),
+    #             min("tx_date").alias(f"first_tx_date{window_suffix}")
+    #         )
+            
+    #         # Calculate derived features
+    #         tx_agg = tx_agg.withColumn(
+    #             f"tx_frequency{window_suffix}", 
+    #             col(f"tx_count{window_suffix}") / greatest(col(f"tx_active_days{window_suffix}"), lit(1))
+    #         ).withColumn(
+    #             f"credit_debit_ratio{window_suffix}",
+    #             when(col(f"total_debits{window_suffix}") > 0, 
+    #                  col(f"total_credits{window_suffix}") / col(f"total_debits{window_suffix}"))
+    #             .otherwise(lit(None))
+    #         ).withColumn(
+    #             f"days_since_last_tx{window_suffix}",
+    #             datediff(lit(snapshot_date), col(f"last_tx_date{window_suffix}"))
+    #         )
+            
+    #         # Join with main features
+    #         tx_features = tx_features.join(tx_agg, "customer_id", "left")
+        
+    #     return customer_360.join(tx_features, ["customer_id", "snapshot_date"], "left")
+    def _add_transaction_features(self, customer_360: DataFrame,
+                              transactions: DataFrame,
+                              snapshot_date: datetime,
+                              lookback_days: int) -> DataFrame:
+        """Add comprehensive transaction features using a single aggregation pass."""
+
         snapshot_ts = lit(snapshot_date)
-        
-        # Filter transactions within lookback window
+
+        # Filter transactions within the largest lookback window (90 days)
         tx_window = transactions.filter(
             (col("tx_date") <= snapshot_ts) &
             (col("tx_date") > date_sub(snapshot_ts, lookback_days))
         )
-        
-        # Calculate transaction aggregations for multiple time windows
-        time_windows = [7, 30, 90]
-        tx_features = customer_360.select("customer_id", "snapshot_date")
-        
-        for window_days in time_windows:
-            window_suffix = f"_{window_days}d"
-            
-            tx_window_filtered = tx_window.filter(
-                col("tx_date") > date_sub(snapshot_ts, window_days)
-            )
-            
-            tx_agg = tx_window_filtered.groupBy("customer_id").agg(
-                # Volume metrics
-                count("*").alias(f"tx_count{window_suffix}"),
-                sum("amount").alias(f"tx_total_amount{window_suffix}"),
-                avg("amount").alias(f"avg_tx_amount{window_suffix}"),
-                stddev("amount").alias(f"std_tx_amount{window_suffix}"),
-                min("amount").alias(f"min_tx_amount{window_suffix}"),
-                max("amount").alias(f"max_tx_amount{window_suffix}"),
-                
-                # Debit/Credit patterns
-                sum(when(col("amount") < 0, -col("amount")).otherwise(0)).alias(f"total_debits{window_suffix}"),
-                sum(when(col("amount") > 0, col("amount")).otherwise(0)).alias(f"total_credits{window_suffix}"),
-                count(when(col("amount") < 0, 1)).alias(f"debit_count{window_suffix}"),
-                count(when(col("amount") > 0, 1)).alias(f"credit_count{window_suffix}"),
-                
-                # Diversity metrics
-                count_distinct("product").alias(f"product_diversity{window_suffix}"),
-                count_distinct("txn_type").alias(f"tx_type_diversity{window_suffix}"),
-                count_distinct("tx_date").alias(f"tx_active_days{window_suffix}"),
-                
-                # Timing metrics
-                max("tx_date").alias(f"last_tx_date{window_suffix}"),
-                min("tx_date").alias(f"first_tx_date{window_suffix}")
-            )
-            
-            # Calculate derived features
-            tx_agg = tx_agg.withColumn(
-                f"tx_frequency{window_suffix}", 
-                col(f"tx_count{window_suffix}") / greatest(col(f"tx_active_days{window_suffix}"), lit(1))
-            ).withColumn(
-                f"credit_debit_ratio{window_suffix}",
-                when(col(f"total_debits{window_suffix}") > 0, 
-                     col(f"total_credits{window_suffix}") / col(f"total_debits{window_suffix}"))
-                .otherwise(lit(None))
-            ).withColumn(
-                f"days_since_last_tx{window_suffix}",
-                datediff(lit(snapshot_date), col(f"last_tx_date{window_suffix}"))
-            )
-            
-            # Join with main features
-            tx_features = tx_features.join(tx_agg, "customer_id", "left")
-        
-        return customer_360.join(tx_features, ["customer_id", "snapshot_date"], "left")
+
+        # Use conditional aggregation to calculate metrics for all time windows at once
+        tx_agg = tx_window.groupBy("customer_id").agg(
+            # --- 90-day aggregations (on the full filtered window) ---
+            count("*").alias("tx_count_90d"),
+            sum("amount").alias("tx_total_amount_90d"),
+            avg("amount").alias("avg_tx_amount_90d"),
+            stddev("amount").alias("std_tx_amount_90d"),
+            min("amount").alias("min_tx_amount_90d"),
+            max("amount").alias("max_tx_amount_90d"),
+            sum(when(col("amount") < 0, -col("amount")).otherwise(0)).alias("total_debits_90d"),
+            sum(when(col("amount") > 0, col("amount")).otherwise(0)).alias("total_credits_90d"),
+            count(when(col("amount") < 0, 1)).alias("debit_count_90d"),
+            count(when(col("amount") > 0, 1)).alias("credit_count_90d"),
+            count_distinct("product").alias("product_diversity_90d"),
+            count_distinct("txn_type").alias("tx_type_diversity_90d"),
+            count_distinct("tx_date").alias("tx_active_days_90d"),
+            max("tx_date").alias("last_tx_date_90d"),
+
+            # --- 30-day conditional aggregations ---
+            count(when(col("tx_date") > date_sub(snapshot_ts, 30), 1)).alias("tx_count_30d"),
+            sum(when(col("tx_date") > date_sub(snapshot_ts, 30), col("amount"))).alias("tx_total_amount_30d"),
+            avg(when(col("tx_date") > date_sub(snapshot_ts, 30), col("amount"))).alias("avg_tx_amount_30d"),
+            stddev(when(col("tx_date") > date_sub(snapshot_ts, 30), col("amount"))).alias("std_tx_amount_30d"),
+            count_distinct(when(col("tx_date") > date_sub(snapshot_ts, 30), col("tx_date"))).alias("tx_active_days_30d"),
+            max(when(col("tx_date") > date_sub(snapshot_ts, 30), col("tx_date"))).alias("last_tx_date_30d"),
+
+            # --- 7-day conditional aggregations ---
+            count(when(col("tx_date") > date_sub(snapshot_ts, 7), 1)).alias("tx_count_7d"),
+            sum(when(col("tx_date") > date_sub(snapshot_ts, 7), col("amount"))).alias("tx_total_amount_7d"),
+            avg(when(col("tx_date") > date_sub(snapshot_ts, 7), col("amount"))).alias("avg_tx_amount_7d"),
+            count_distinct(when(col("tx_date") > date_sub(snapshot_ts, 7), col("tx_date"))).alias("tx_active_days_7d"),
+            max(when(col("tx_date") > date_sub(snapshot_ts, 7), col("tx_date"))).alias("last_tx_date_7d")
+        )
+
+        # Calculate derived features for each time window
+        tx_agg = tx_agg.withColumn(
+            "tx_frequency_90d", col("tx_count_90d") / greatest(col("tx_active_days_90d"), lit(1))
+        ).withColumn(
+            "credit_debit_ratio_90d",
+            when(col("total_debits_90d") > 0, col("total_credits_90d") / col("total_debits_90d")).otherwise(lit(None))
+        ).withColumn(
+            "days_since_last_tx_90d", datediff(snapshot_ts, col("last_tx_date_90d"))
+        ).withColumn(
+            "tx_frequency_30d", col("tx_count_30d") / greatest(col("tx_active_days_30d"), lit(1))
+        ).withColumn(
+            "days_since_last_tx_30d", datediff(snapshot_ts, col("last_tx_date_30d"))
+        ).withColumn(
+            "tx_frequency_7d", col("tx_count_7d") / greatest(col("tx_active_days_7d"), lit(1))
+        ).withColumn(
+            "days_since_last_tx_7d", datediff(snapshot_ts, col("last_tx_date_7d"))
+        )
+
+        return customer_360.join(tx_agg, "customer_id", "left")
     
-    def _add_interaction_features(self, customer_360: DataFrame, 
-                                interactions: DataFrame, 
-                                snapshot_date: datetime, 
+    # def _add_interaction_features(self, customer_360: DataFrame, 
+    #                             interactions: DataFrame, 
+    #                             snapshot_date: datetime, 
+    #                             lookback_days: int) -> DataFrame:
+    #     """Add comprehensive interaction features"""
+        
+    #     snapshot_ts = lit(snapshot_date)
+        
+    #     # Filter interactions within lookback window
+    #     int_window = interactions.filter(
+    #         (col("interaction_date") <= snapshot_ts) &
+    #         (col("interaction_date") > date_sub(snapshot_ts, lookback_days))
+    #     )
+        
+    #     # Calculate interaction aggregations for multiple time windows
+    #     time_windows = [7, 30, 90]
+    #     int_features = customer_360.select("customer_id", "snapshot_date")
+        
+    #     for window_days in time_windows:
+    #         window_suffix = f"_{window_days}d"
+            
+    #         int_window_filtered = int_window.filter(
+    #             col("interaction_date") > date_sub(snapshot_ts, window_days)
+    #         )
+            
+    #         int_agg = int_window_filtered.groupBy("customer_id").agg(
+    #             # Volume metrics
+    #             count("*").alias(f"interaction_count{window_suffix}"),
+    #             count_distinct("interaction_date").alias(f"interaction_active_days{window_suffix}"),
+    #             count_distinct("interaction_type").alias(f"interaction_type_diversity{window_suffix}"),
+                
+    #             # Specific interaction types
+    #             count(when(col("interaction_type") == "login", 1)).alias(f"login_count{window_suffix}"),
+    #             count(when(col("interaction_type") == "support", 1)).alias(f"support_count{window_suffix}"),
+    #             count(when(col("interaction_type") == "mobile", 1)).alias(f"mobile_count{window_suffix}"),
+    #             count(when(col("interaction_type") == "web", 1)).alias(f"web_count{window_suffix}"),
+                
+    #             # Timing metrics
+    #             max("interaction_date").alias(f"last_interaction_date{window_suffix}"),
+    #             min("interaction_date").alias(f"first_interaction_date{window_suffix}")
+    #         )
+            
+    #         # Calculate derived features
+    #         int_agg = int_agg.withColumn(
+    #             f"interaction_frequency{window_suffix}", 
+    #             col(f"interaction_count{window_suffix}") / greatest(col(f"interaction_active_days{window_suffix}"), lit(1))
+    #         ).withColumn(
+    #             f"days_since_last_interaction{window_suffix}",
+    #             datediff(lit(snapshot_date), col(f"last_interaction_date{window_suffix}"))
+    #         ).withColumn(
+    #             f"digital_engagement_score{window_suffix}",
+    #             (coalesce(col(f"mobile_count{window_suffix}"), lit(0)) + 
+    #              coalesce(col(f"web_count{window_suffix}"), lit(0)) + 
+    #              coalesce(col(f"login_count{window_suffix}"), lit(0))) / 3.0
+    #         )
+            
+    #         # Join with main features
+    #         int_features = int_features.join(int_agg, "customer_id", "left")
+        
+    #     return customer_360.join(int_features, ["customer_id", "snapshot_date"], "left")
+    def _add_interaction_features(self, customer_360: DataFrame,
+                                interactions: DataFrame,
+                                snapshot_date: datetime,
                                 lookback_days: int) -> DataFrame:
-        """Add comprehensive interaction features"""
-        
+        """Add comprehensive interaction features using a single aggregation pass."""
+
         snapshot_ts = lit(snapshot_date)
-        
-        # Filter interactions within lookback window
+
+        # Filter interactions within the largest lookback window (90 days)
         int_window = interactions.filter(
             (col("interaction_date") <= snapshot_ts) &
             (col("interaction_date") > date_sub(snapshot_ts, lookback_days))
         )
-        
-        # Calculate interaction aggregations for multiple time windows
-        time_windows = [7, 30, 90]
-        int_features = customer_360.select("customer_id", "snapshot_date")
-        
-        for window_days in time_windows:
-            window_suffix = f"_{window_days}d"
-            
-            int_window_filtered = int_window.filter(
-                col("interaction_date") > date_sub(snapshot_ts, window_days)
-            )
-            
-            int_agg = int_window_filtered.groupBy("customer_id").agg(
-                # Volume metrics
-                count("*").alias(f"interaction_count{window_suffix}"),
-                count_distinct("interaction_date").alias(f"interaction_active_days{window_suffix}"),
-                count_distinct("interaction_type").alias(f"interaction_type_diversity{window_suffix}"),
-                
-                # Specific interaction types
-                count(when(col("interaction_type") == "login", 1)).alias(f"login_count{window_suffix}"),
-                count(when(col("interaction_type") == "support", 1)).alias(f"support_count{window_suffix}"),
-                count(when(col("interaction_type") == "mobile", 1)).alias(f"mobile_count{window_suffix}"),
-                count(when(col("interaction_type") == "web", 1)).alias(f"web_count{window_suffix}"),
-                
-                # Timing metrics
-                max("interaction_date").alias(f"last_interaction_date{window_suffix}"),
-                min("interaction_date").alias(f"first_interaction_date{window_suffix}")
-            )
-            
-            # Calculate derived features
-            int_agg = int_agg.withColumn(
-                f"interaction_frequency{window_suffix}", 
-                col(f"interaction_count{window_suffix}") / greatest(col(f"interaction_active_days{window_suffix}"), lit(1))
-            ).withColumn(
-                f"days_since_last_interaction{window_suffix}",
-                datediff(lit(snapshot_date), col(f"last_interaction_date{window_suffix}"))
-            ).withColumn(
-                f"digital_engagement_score{window_suffix}",
-                (coalesce(col(f"mobile_count{window_suffix}"), lit(0)) + 
-                 coalesce(col(f"web_count{window_suffix}"), lit(0)) + 
-                 coalesce(col(f"login_count{window_suffix}"), lit(0))) / 3.0
-            )
-            
-            # Join with main features
-            int_features = int_features.join(int_agg, "customer_id", "left")
-        
-        return customer_360.join(int_features, ["customer_id", "snapshot_date"], "left")
+
+        # Use conditional aggregation to calculate metrics for all time windows at once
+        int_agg = int_window.groupBy("customer_id").agg(
+            # --- 90-day aggregations (on the full filtered window) ---
+            count("*").alias("interaction_count_90d"),
+            count_distinct("interaction_date").alias("interaction_active_days_90d"),
+            count_distinct("interaction_type").alias("interaction_type_diversity_90d"),
+            count(when(col("interaction_type") == "login", 1)).alias("login_count_90d"),
+            count(when(col("interaction_type") == "support", 1)).alias("support_count_90d"),
+            count(when(col("interaction_type") == "mobile", 1)).alias("mobile_count_90d"),
+            count(when(col("interaction_type") == "web", 1)).alias("web_count_90d"),
+            max("interaction_date").alias("last_interaction_date_90d"),
+
+            # --- 30-day conditional aggregations ---
+            count(when(col("interaction_date") > date_sub(snapshot_ts, 30), 1)).alias("interaction_count_30d"),
+            count_distinct(when(col("interaction_date") > date_sub(snapshot_ts, 30), "interaction_date")).alias("interaction_active_days_30d"),
+            max(when(col("interaction_date") > date_sub(snapshot_ts, 30), "interaction_date")).alias("last_interaction_date_30d"),
+
+            # --- 7-day conditional aggregations ---
+            count(when(col("interaction_date") > date_sub(snapshot_ts, 7), 1)).alias("interaction_count_7d"),
+            count_distinct(when(col("interaction_date") > date_sub(snapshot_ts, 7), "interaction_date")).alias("interaction_active_days_7d"),
+            max(when(col("interaction_date") > date_sub(snapshot_ts, 7), "interaction_date")).alias("last_interaction_date_7d")
+        )
+
+        # Calculate derived features for each time window
+        int_agg = int_agg.withColumn(
+            "interaction_frequency_90d", col("interaction_count_90d") / greatest(col("interaction_active_days_90d"), lit(1))
+        ).withColumn(
+            "days_since_last_interaction_90d", datediff(snapshot_ts, col("last_interaction_date_90d"))
+        ).withColumn(
+            "digital_engagement_score_90d",
+            (coalesce(col("mobile_count_90d"), lit(0)) +
+            coalesce(col("web_count_90d"), lit(0)) +
+            coalesce(col("login_count_90d"), lit(0))) / 3.0
+        ).withColumn(
+            "interaction_frequency_30d", col("interaction_count_30d") / greatest(col("interaction_active_days_30d"), lit(1))
+        ).withColumn(
+            "days_since_last_interaction_30d", datediff(snapshot_ts, col("last_interaction_date_30d"))
+        ).withColumn(
+            "interaction_frequency_7d", col("interaction_count_7d") / greatest(col("interaction_active_days_7d"), lit(1))
+        ).withColumn(
+            "days_since_last_interaction_7d", datediff(snapshot_ts, col("last_interaction_date_7d"))
+        )
+
+        return customer_360.join(int_agg, "customer_id", "left")
     
     def _add_behavioral_features(self, customer_360: DataFrame, 
                                transactions: DataFrame, 
@@ -475,51 +596,74 @@ class CreditUnionFeatureEngineering:
         
         return customer_360_rolling
     
-    def create_ml_feature_store(self, customer_360: DataFrame, 
-                              transactions: DataFrame,
-                              prediction_horizon_days: int = 30,
-                              model_name: str = "churn_prediction",
-                              model_version: str = "v1.0") -> DataFrame:
-        """Create ML-ready feature store with churn labels"""
-        
-        self.logger.info(f"Creating ML feature store for {model_name} {model_version}")
-        
-        # For each customer snapshot, determine if they churned in the prediction horizon
-        ml_features = customer_360.alias("c360")
-        
-        # Find customers who had transactions after each snapshot date
-        future_transactions = transactions.select("customer_id", "tx_date").alias("future_tx")
-        
-        # Join to find future activity
-        ml_features = ml_features.join(
-            future_transactions,
-            (col("c360.customer_id") == col("future_tx.customer_id")) &
-            (col("future_tx.tx_date") > col("c360.snapshot_date")) &
-            (col("future_tx.tx_date") <= date_add(col("c360.snapshot_date"), prediction_horizon_days)),
+    def _calculate_churn_label(self, customer_360: DataFrame,
+                           transactions: DataFrame,
+                           interactions: DataFrame,
+                           prediction_horizon_days: int) -> DataFrame:
+        """
+        Calculates the churn label based on the absence of future transactions or interactions.
+        A customer is considered churned (label = 1) if there is no activity
+        (transactions or interactions) within the prediction horizon.
+        """
+        # Define the window for future activity for each snapshot
+        window_spec = Window.partitionBy("customer_id", "snapshot_date")
+
+        # Find the first transaction and interaction date for each customer AFTER their snapshot date
+        future_tx = transactions.selectExpr("customer_id", "tx_date as activity_date")
+        future_int = interactions.selectExpr("customer_id", "interaction_date as activity_date")
+        future_activity = future_tx.unionByName(future_int)
+
+        # Join activity to snapshots and check if it falls within the prediction horizon
+        ml_features = customer_360.alias("c360").join(
+            future_activity.alias("act"),
+            (col("c360.customer_id") == col("act.customer_id")) &
+            (col("act.activity_date") > col("c360.snapshot_date")) &
+            (col("act.activity_date") <= date_add(col("c360.snapshot_date"), prediction_horizon_days)),
             "left"
         )
-        
-        # Label churn: 1 if no future transactions, 0 if there are future transactions
+
+        # A customer has churned if there is no activity_date found in the horizon
         ml_features = ml_features.withColumn(
             "has_future_activity",
-            when(col("future_tx.tx_date").isNotNull(), 1).otherwise(0)
-        ).groupBy(
+            when(col("act.activity_date").isNotNull(), 1).otherwise(0)
+        )
+
+        # Group by the original snapshot records to get one row per customer-snapshot
+        # and determine the final churn label.
+        churn_label_df = ml_features.groupBy(
             *[col(f"c360.{c}") for c in customer_360.columns]
         ).agg(
-            max("has_future_activity").alias("has_future_activity")
+            max("has_future_activity").alias("activity_found")
         ).withColumn(
             "churn_label",
-            when(col("has_future_activity") == 0, 1).otherwise(0)
+            when(col("activity_found") == 0, 1).otherwise(0)
+        ).drop("activity_found")
+
+        return churn_label_df
+    
+    def create_ml_feature_store_comprehensive(self, customer_360: DataFrame, 
+                                         transactions: DataFrame,
+                                         interactions: DataFrame,
+                                         prediction_horizon_days: int = 30,
+                                         model_name: str = "churn_prediction",
+                                         model_version: str = "v1.0") -> DataFrame:
+        """Most comprehensive approach considering both transactions and interactions for churn labeling."""
+        
+        self.logger.info(f"Creating ML feature store for {model_name} {model_version} (comprehensive churn)")
+        
+        # Use the unified churn logic
+        ml_features = self._calculate_churn_label(
+            customer_360, transactions, interactions, prediction_horizon_days
         )
         
-        # Add comprehensive metadata
+        # Add metadata
         ml_features = ml_features.withColumn("model_name", lit(model_name)) \
             .withColumn("model_version", lit(model_version)) \
             .withColumn("prediction_horizon_days", lit(prediction_horizon_days)) \
             .withColumn("feature_creation_timestamp", current_timestamp()) \
-            .withColumn("data_quality_score", lit(1.0))  # Can be enhanced
+            .withColumn("data_quality_score", lit(1.0))
         
-        return ml_features.drop("has_future_activity")
+        return ml_features
     
     def get_feature_columns_for_ml(self, ml_feature_store: DataFrame) -> dict:
         """Extract feature columns suitable for ML training with categorization"""
@@ -553,8 +697,49 @@ class CreditUnionFeatureEngineering:
             'total_features': len(feature_columns)
         }
 
+    def validate_pipeline_results(self, customer_360: DataFrame, ml_feature_store: DataFrame,
+                                expected_customers: int, expected_weeks: int) -> dict:
+        """Validate pipeline results for data quality"""
+        
+        validation_results = {}
+        
+        # Check record counts
+        c360_count = customer_360.count()
+        ml_count = ml_feature_store.count()
+        expected_records = expected_customers * expected_weeks
+        
+        validation_results['record_count_check'] = {
+            'customer_360_count': c360_count,
+            'ml_feature_store_count': ml_count,
+            'expected_records': expected_records,
+            'count_reasonable': abs(c360_count - expected_records) < (expected_records * 0.1)
+        }
+        
+        # Check churn rate
+        churn_rate = ml_feature_store.agg(avg("churn_label")).collect()[0][0]
+        validation_results['churn_rate_check'] = {
+            'churn_rate': churn_rate,
+            'reasonable_range': 0.02 <= churn_rate <= 0.20,  # 2-20% is typical
+            'warning': churn_rate > 0.30 or churn_rate < 0.01
+        }
+        
+        # Check for data leakage
+        future_features = [col for col in ml_feature_store.columns 
+                        if 'future' in col.lower() or 'after' in col.lower()]
+        validation_results['data_leakage_check'] = {
+            'suspicious_features': future_features,
+            'clean': len(future_features) == 0
+        }
+        
+        # Check snapshot date distribution
+        snapshot_dates = ml_feature_store.select("snapshot_date").distinct().count()
+        validation_results['temporal_check'] = {
+            'unique_snapshot_dates': snapshot_dates,
+            'expected_dates': expected_weeks,
+            'reasonable': abs(snapshot_dates - expected_weeks) <= 2
+        }
 
-def run_unified_pipeline(spark: SparkSession,
+def run_unified_pipeline_enhanced(spark: SparkSession,
                         data_path: str = None,
                         start_date: str = "2023-01-01",
                         end_date: str = "2023-12-31",
@@ -562,12 +747,13 @@ def run_unified_pipeline(spark: SparkSession,
                         lookback_days: int = 90,
                         prediction_horizon_days: int = 30,
                         output_path: str = str(PROCESSED_PATH),
+                        validate_results: bool = True,
                         **dataframes):
     """
-    Unified pipeline for creating Customer 360 and ML feature store
+    Enhanced unified pipeline with validation and improved churn labeling
     """
     
-    print("=== Starting Feature Engineering Pipeline ===")
+    print("=== Starting Enhanced Feature Engineering Pipeline ===")
     
     # Initialize feature engineering
     fe = CreditUnionFeatureEngineering(spark)
@@ -582,38 +768,38 @@ def run_unified_pipeline(spark: SparkSession,
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
     
+    # Calculate expected metrics
+    expected_weeks = ((end_dt - start_dt).days // frequency_days) + 1
+    expected_customers = data_dict['customers'].count()
+    
+    print(f"Expected: {expected_customers:,} customers × {expected_weeks} weeks = {expected_customers * expected_weeks:,} records")
+    
     # Create rolling Customer 360 snapshots
     print("Creating rolling Customer 360 snapshots...")
     customer_360_rolling = fe.generate_rolling_snapshots(
         data_dict, start_dt, end_dt, frequency_days, lookback_days
     )
     
-    # Create ML feature store
-    print("Creating ML feature store...")
-    ml_feature_store = fe.create_ml_feature_store(
+    # Create ML feature store with improved churn labeling
+    print("Creating ML feature store with improved churn labeling...")
+    ml_feature_store = fe.create_ml_feature_store_comprehensive(
         customer_360_rolling, 
         data_dict['transactions'],
+        data_dict['interactions'],
         prediction_horizon_days
     )
     
+    # Validate results
+    if validate_results:
+        validation_results = fe.validate_pipeline_results(
+            customer_360_rolling, ml_feature_store, expected_customers, expected_weeks
+        )
+        print("\n=== Validation Results ===")
+        for check_name, results in validation_results.items():
+            print(f"{check_name}: {results}")
+    
     # Get feature information
     feature_info = fe.get_feature_columns_for_ml(ml_feature_store)
-    
-    # Save outputs with optimized partitioning
-    output_path = Path(output_path)
-    output_path.mkdir(exist_ok=True)
-    
-    print("Saving Customer 360 snapshots...")
-    customer_360_rolling.write \
-        .mode("overwrite") \
-        .partitionBy("snapshot_date") \
-        .parquet(str(output_path / "customer_360_snapshots"))
-    
-    print("Saving ML feature store...")
-    ml_feature_store.write \
-        .mode("overwrite") \
-        .partitionBy("snapshot_date") \
-        .parquet(str(output_path / "ml_feature_store"))
     
     # Calculate statistics
     customer_360_count = customer_360_rolling.count()
@@ -630,15 +816,27 @@ def run_unified_pipeline(spark: SparkSession,
     print(f"Average engagement score: {avg_engagement:.3f}")
     print(f"Total features for ML: {feature_info['total_features']}")
     
-    # Print feature categories
-    print("\n=== Feature Categories ===")
-    for category, features in feature_info['feature_categories'].items():
-        print(f"{category.capitalize()}: {len(features)} features")
+    # Save outputs if path provided
+    if output_path:
+        output_path = Path(output_path)
+        output_path.mkdir(exist_ok=True)
+        
+        print("Saving outputs...")
+        customer_360_rolling.write \
+            .mode("overwrite") \
+            .partitionBy("snapshot_date") \
+            .parquet(str(output_path / "customer_360_snapshots"))
+        
+        ml_feature_store.write \
+            .mode("overwrite") \
+            .partitionBy("snapshot_date") \
+            .parquet(str(output_path / "ml_feature_store"))
     
     return {
         'customer_360_rolling': customer_360_rolling,
         'ml_feature_store': ml_feature_store,
         'feature_info': feature_info,
+        'validation_results': validation_results if validate_results else None,
         'statistics': {
             'customer_360_count': customer_360_count,
             'ml_feature_count': ml_feature_count,
@@ -655,7 +853,7 @@ def run_unified_pipeline(spark: SparkSession,
     
 #     try:
 #         # Run the pipeline
-#         results = run_unified_pipeline(
+#         results = run_unified_pipeline_enhanced(
 #             spark=spark,
 #             data_path=str(RAW_DATA_PATH)
 #         )
@@ -674,7 +872,7 @@ spark = get_spark_session()
     
 try:
     # Run the pipeline
-    results = run_unified_pipeline(
+    results = run_unified_pipeline_enhanced(
         spark=spark,
         data_path=str(RAW_DATA_PATH)
     )
