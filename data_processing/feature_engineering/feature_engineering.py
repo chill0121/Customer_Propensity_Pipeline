@@ -678,10 +678,8 @@ try:
         spark=spark,
         data_path=str(RAW_DATA_PATH)
     )
-    
-    print("Pipeline completed successfully!")
-    print(f"Generated {results['feature_count']} features for ML")
-    print(f"Feature columns: {results['feature_columns'][:10]}...")  # Show first 10
+
+    print("\nPipeline execution complete.\n")
     
 except Exception as e:
     print(f"Pipeline failed: {e}")
