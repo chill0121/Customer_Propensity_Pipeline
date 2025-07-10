@@ -543,7 +543,6 @@ class CreditUnionFeatureEngineering:
                 (datediff(col("snapshot_date"), col("last_activity_date_as_of_snapshot")) <= 120)
             )
         )
-
         
         # Step 6: FIXED - Calculate future activity properly
         # Look for activity AFTER snapshot date to determine churn
