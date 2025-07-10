@@ -3,10 +3,11 @@ from pyspark.sql.functions import *
 from pyspark.sql.types import *
 from pyspark.sql.window import Window
 from pyspark import StorageLevel 
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from pathlib import Path
 import logging
 from functools import reduce
+import builtins
 
 # Initialize Spark session
 def get_spark_session():
@@ -22,6 +23,8 @@ def get_spark_session():
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RAW_DATA_PATH = BASE_DIR / "data" / "raw"
 PROCESSED_PATH = BASE_DIR / "data" / "processed"
+START_DATE = datetime(2024, 1, 1)
+END_DATE = datetime(2024, 12, 31)
 
 class CreditUnionFeatureEngineering:
     """
@@ -151,74 +154,6 @@ class CreditUnionFeatureEngineering:
         
         return customer_360
     
-    # def _add_transaction_features(self, customer_360: DataFrame, 
-    #                             transactions: DataFrame, 
-    #                             snapshot_date: datetime, 
-    #                             lookback_days: int) -> DataFrame:
-    #     """Add comprehensive transaction features"""
-        
-    #     snapshot_ts = lit(snapshot_date)
-        
-    #     # Filter transactions within lookback window
-    #     tx_window = transactions.filter(
-    #         (col("tx_date") <= snapshot_ts) &
-    #         (col("tx_date") > date_sub(snapshot_ts, lookback_days))
-    #     )
-        
-    #     # Calculate transaction aggregations for multiple time windows
-    #     time_windows = [7, 30, 90]
-    #     tx_features = customer_360.select("customer_id", "snapshot_date")
-        
-    #     for window_days in time_windows:
-    #         window_suffix = f"_{window_days}d"
-            
-    #         tx_window_filtered = tx_window.filter(
-    #             col("tx_date") > date_sub(snapshot_ts, window_days)
-    #         )
-            
-    #         tx_agg = tx_window_filtered.groupBy("customer_id").agg(
-    #             # Volume metrics
-    #             count("*").alias(f"tx_count{window_suffix}"),
-    #             sum("amount").alias(f"tx_total_amount{window_suffix}"),
-    #             avg("amount").alias(f"avg_tx_amount{window_suffix}"),
-    #             stddev("amount").alias(f"std_tx_amount{window_suffix}"),
-    #             min("amount").alias(f"min_tx_amount{window_suffix}"),
-    #             max("amount").alias(f"max_tx_amount{window_suffix}"),
-                
-    #             # Debit/Credit patterns
-    #             sum(when(col("amount") < 0, -col("amount")).otherwise(0)).alias(f"total_debits{window_suffix}"),
-    #             sum(when(col("amount") > 0, col("amount")).otherwise(0)).alias(f"total_credits{window_suffix}"),
-    #             count(when(col("amount") < 0, 1)).alias(f"debit_count{window_suffix}"),
-    #             count(when(col("amount") > 0, 1)).alias(f"credit_count{window_suffix}"),
-                
-    #             # Diversity metrics
-    #             count_distinct("product").alias(f"product_diversity{window_suffix}"),
-    #             count_distinct("txn_type").alias(f"tx_type_diversity{window_suffix}"),
-    #             count_distinct("tx_date").alias(f"tx_active_days{window_suffix}"),
-                
-    #             # Timing metrics
-    #             max("tx_date").alias(f"last_tx_date{window_suffix}"),
-    #             min("tx_date").alias(f"first_tx_date{window_suffix}")
-    #         )
-            
-    #         # Calculate derived features
-    #         tx_agg = tx_agg.withColumn(
-    #             f"tx_frequency{window_suffix}", 
-    #             col(f"tx_count{window_suffix}") / greatest(col(f"tx_active_days{window_suffix}"), lit(1))
-    #         ).withColumn(
-    #             f"credit_debit_ratio{window_suffix}",
-    #             when(col(f"total_debits{window_suffix}") > 0, 
-    #                  col(f"total_credits{window_suffix}") / col(f"total_debits{window_suffix}"))
-    #             .otherwise(lit(None))
-    #         ).withColumn(
-    #             f"days_since_last_tx{window_suffix}",
-    #             datediff(lit(snapshot_date), col(f"last_tx_date{window_suffix}"))
-    #         )
-            
-    #         # Join with main features
-    #         tx_features = tx_features.join(tx_agg, "customer_id", "left")
-        
-    #     return customer_360.join(tx_features, ["customer_id", "snapshot_date"], "left")
     def _add_transaction_features(self, customer_360: DataFrame,
                               transactions: DataFrame,
                               snapshot_date: datetime,
@@ -286,71 +221,11 @@ class CreditUnionFeatureEngineering:
         )
 
         return customer_360.join(tx_agg, "customer_id", "left")
-    
-    # def _add_interaction_features(self, customer_360: DataFrame, 
-    #                             interactions: DataFrame, 
-    #                             snapshot_date: datetime, 
-    #                             lookback_days: int) -> DataFrame:
-    #     """Add comprehensive interaction features"""
-        
-    #     snapshot_ts = lit(snapshot_date)
-        
-    #     # Filter interactions within lookback window
-    #     int_window = interactions.filter(
-    #         (col("interaction_date") <= snapshot_ts) &
-    #         (col("interaction_date") > date_sub(snapshot_ts, lookback_days))
-    #     )
-        
-    #     # Calculate interaction aggregations for multiple time windows
-    #     time_windows = [7, 30, 90]
-    #     int_features = customer_360.select("customer_id", "snapshot_date")
-        
-    #     for window_days in time_windows:
-    #         window_suffix = f"_{window_days}d"
-            
-    #         int_window_filtered = int_window.filter(
-    #             col("interaction_date") > date_sub(snapshot_ts, window_days)
-    #         )
-            
-    #         int_agg = int_window_filtered.groupBy("customer_id").agg(
-    #             # Volume metrics
-    #             count("*").alias(f"interaction_count{window_suffix}"),
-    #             count_distinct("interaction_date").alias(f"interaction_active_days{window_suffix}"),
-    #             count_distinct("interaction_type").alias(f"interaction_type_diversity{window_suffix}"),
-                
-    #             # Specific interaction types
-    #             count(when(col("interaction_type") == "login", 1)).alias(f"login_count{window_suffix}"),
-    #             count(when(col("interaction_type") == "support", 1)).alias(f"support_count{window_suffix}"),
-    #             count(when(col("interaction_type") == "mobile", 1)).alias(f"mobile_count{window_suffix}"),
-    #             count(when(col("interaction_type") == "web", 1)).alias(f"web_count{window_suffix}"),
-                
-    #             # Timing metrics
-    #             max("interaction_date").alias(f"last_interaction_date{window_suffix}"),
-    #             min("interaction_date").alias(f"first_interaction_date{window_suffix}")
-    #         )
-            
-    #         # Calculate derived features
-    #         int_agg = int_agg.withColumn(
-    #             f"interaction_frequency{window_suffix}", 
-    #             col(f"interaction_count{window_suffix}") / greatest(col(f"interaction_active_days{window_suffix}"), lit(1))
-    #         ).withColumn(
-    #             f"days_since_last_interaction{window_suffix}",
-    #             datediff(lit(snapshot_date), col(f"last_interaction_date{window_suffix}"))
-    #         ).withColumn(
-    #             f"digital_engagement_score{window_suffix}",
-    #             (coalesce(col(f"mobile_count{window_suffix}"), lit(0)) + 
-    #              coalesce(col(f"web_count{window_suffix}"), lit(0)) + 
-    #              coalesce(col(f"login_count{window_suffix}"), lit(0))) / 3.0
-    #         )
-            
-    #         # Join with main features
-    #         int_features = int_features.join(int_agg, "customer_id", "left")
-        
-    #     return customer_360.join(int_features, ["customer_id", "snapshot_date"], "left")
+
     def _add_interaction_features(self, customer_360: DataFrame,
-                                interactions: DataFrame,
-                                snapshot_date: datetime,
-                                lookback_days: int) -> DataFrame:
+                                    interactions: DataFrame,
+                                    snapshot_date: datetime,
+                                    lookback_days: int) -> DataFrame:
         """Add comprehensive interaction features using a single aggregation pass."""
 
         snapshot_ts = lit(snapshot_date)
@@ -375,13 +250,13 @@ class CreditUnionFeatureEngineering:
 
             # --- 30-day conditional aggregations ---
             count(when(col("interaction_date") > date_sub(snapshot_ts, 30), 1)).alias("interaction_count_30d"),
-            count_distinct(when(col("interaction_date") > date_sub(snapshot_ts, 30), "interaction_date")).alias("interaction_active_days_30d"),
-            max(when(col("interaction_date") > date_sub(snapshot_ts, 30), "interaction_date")).alias("last_interaction_date_30d"),
+            count_distinct(when(col("interaction_date") > date_sub(snapshot_ts, 30), col("interaction_date"))).alias("interaction_active_days_30d"), # CORRECTED
+            max(when(col("interaction_date") > date_sub(snapshot_ts, 30), col("interaction_date"))).alias("last_interaction_date_30d"), # CORRECTED
 
             # --- 7-day conditional aggregations ---
             count(when(col("interaction_date") > date_sub(snapshot_ts, 7), 1)).alias("interaction_count_7d"),
-            count_distinct(when(col("interaction_date") > date_sub(snapshot_ts, 7), "interaction_date")).alias("interaction_active_days_7d"),
-            max(when(col("interaction_date") > date_sub(snapshot_ts, 7), "interaction_date")).alias("last_interaction_date_7d")
+            count_distinct(when(col("interaction_date") > date_sub(snapshot_ts, 7), col("interaction_date"))).alias("interaction_active_days_7d"), # CORRECTED
+            max(when(col("interaction_date") > date_sub(snapshot_ts, 7), col("interaction_date"))).alias("last_interaction_date_7d") # CORRECTED
         )
 
         # Calculate derived features for each time window
@@ -596,50 +471,147 @@ class CreditUnionFeatureEngineering:
         
         return customer_360_rolling
     
+    
     def _calculate_churn_label(self, customer_360: DataFrame,
-                           transactions: DataFrame,
-                           interactions: DataFrame,
-                           prediction_horizon_days: int) -> DataFrame:
+                                transactions: DataFrame,
+                                interactions: DataFrame,
+                                prediction_horizon_days: int) -> DataFrame:
         """
-        Calculates the churn label based on the absence of future transactions or interactions.
-        A customer is considered churned (label = 1) if there is no activity
-        (transactions or interactions) within the prediction horizon.
+        FIXED churn label calculation that properly handles temporal consistency:
+        1. Only includes customers who joined BEFORE snapshot date
+        2. Calculates last_activity_date AS OF each snapshot date
+        3. Implements proper eligibility criteria
+        4. Handles new customers with appropriate grace periods
         """
-        # Define the window for future activity for each snapshot
-        window_spec = Window.partitionBy("customer_id", "snapshot_date")
-
-        # Find the first transaction and interaction date for each customer AFTER their snapshot date
-        future_tx = transactions.selectExpr("customer_id", "tx_date as activity_date")
-        future_int = interactions.selectExpr("customer_id", "interaction_date as activity_date")
-        future_activity = future_tx.unionByName(future_int)
-
-        # Join activity to snapshots and check if it falls within the prediction horizon
-        ml_features = customer_360.alias("c360").join(
-            future_activity.alias("act"),
-            (col("c360.customer_id") == col("act.customer_id")) &
-            (col("act.activity_date") > col("c360.snapshot_date")) &
-            (col("act.activity_date") <= date_add(col("c360.snapshot_date"), prediction_horizon_days)),
+        
+        # Step 1: Create unified activity timeline
+        tx_activity = transactions.select(
+            col("customer_id"),
+            col("tx_date").alias("activity_date"),
+            lit("transaction").alias("activity_type")
+        )
+        
+        int_activity = interactions.select(
+            col("customer_id"), 
+            col("interaction_date").alias("activity_date"),
+            lit("interaction").alias("activity_type")
+        )
+        
+        all_activities = tx_activity.unionByName(int_activity)
+        
+        # Step 2: FIXED - Only include customers who joined BEFORE snapshot date
+        # This eliminates impossible scenarios where snapshots exist before customer joined
+        eligible_customers = customer_360.filter(
+            col("join_date") <= col("snapshot_date")
+        ).filter(
+            # Give customers at least 7 days to establish activity patterns
+            datediff(col("snapshot_date"), col("join_date")) >= 7
+        )
+        
+        # Step 3: FIXED - Calculate last activity AS OF each snapshot date
+        # This ensures we only consider historical activity, not future activity
+        snapshot_activities = all_activities.join(
+            eligible_customers.select("customer_id", "snapshot_date"),
+            "customer_id"
+        ).filter(
+            col("activity_date") <= col("snapshot_date")  # Only past/current activity
+        )
+        
+        # Get last activity date as of each snapshot
+        customer_last_activity_snapshot = snapshot_activities.groupBy(
+            "customer_id", "snapshot_date"
+        ).agg(
+            max("activity_date").alias("last_activity_date_as_of_snapshot")
+        )
+        
+        # Step 4: Join with eligible customers
+        customer_360_with_activity = eligible_customers.join(
+            customer_last_activity_snapshot,
+            ["customer_id", "snapshot_date"],
             "left"
         )
-
-        # A customer has churned if there is no activity_date found in the horizon
-        ml_features = ml_features.withColumn(
-            "has_future_activity",
-            when(col("act.activity_date").isNotNull(), 1).otherwise(0)
+        
+        # Step 5: FIXED - Apply activity-based filtering properly
+        # Only include customers who have been reasonably active or are genuinely new
+        active_customers = customer_360_with_activity.filter(
+            col("last_activity_date_as_of_snapshot").isNull() |
+            (datediff(col("snapshot_date"), col("last_activity_date_as_of_snapshot")) <= 90)
+        ).filter(
+            (datediff(col("snapshot_date"), col("join_date")) <= 30) |
+            (
+                col("last_activity_date_as_of_snapshot").isNotNull() & 
+                (datediff(col("snapshot_date"), col("last_activity_date_as_of_snapshot")) <= 120)
+            )
         )
 
-        # Group by the original snapshot records to get one row per customer-snapshot
-        # and determine the final churn label.
-        churn_label_df = ml_features.groupBy(
-            *[col(f"c360.{c}") for c in customer_360.columns]
-        ).agg(
-            max("has_future_activity").alias("activity_found")
+        
+        # Step 6: FIXED - Calculate future activity properly
+        # Look for activity AFTER snapshot date to determine churn
+        customer_next_activity = all_activities.join(
+            active_customers.select("customer_id", "snapshot_date"),
+            "customer_id"
+        ).filter(
+            col("activity_date") > col("snapshot_date")  # Future activity
+        ).groupBy("customer_id", "snapshot_date").agg(
+            min("activity_date").alias("next_activity_date")
+        )
+        
+        # Step 7: Join and calculate churn metrics
+        ml_features = active_customers.join(
+            customer_next_activity,
+            ["customer_id", "snapshot_date"],
+            "left"
+        ).withColumn(
+            "days_to_next_activity",
+            when(col("next_activity_date").isNotNull(),
+                datediff(col("next_activity_date"), col("snapshot_date")))
+            .otherwise(lit(None))
+        ).withColumn(
+            "prediction_end_date", 
+            date_add(col("snapshot_date"), prediction_horizon_days)
         ).withColumn(
             "churn_label",
-            when(col("activity_found") == 0, 1).otherwise(0)
-        ).drop("activity_found")
-
-        return churn_label_df
+            when(
+                # Customer churns if no future activity within prediction horizon
+                col("next_activity_date").isNull() |
+                (col("days_to_next_activity") > prediction_horizon_days),
+                1
+            ).otherwise(0)
+        )
+        
+        # Step 8: FIXED - Add proper business logic
+        ml_features = ml_features.withColumn(
+            "days_since_join_at_snapshot",
+            datediff(col("snapshot_date"), col("join_date"))
+        ).withColumn(
+            "is_new_customer",
+            when(col("days_since_join_at_snapshot") <= 30, 1).otherwise(0)
+        ).withColumn(
+            "days_since_last_activity",
+            when(col("last_activity_date_as_of_snapshot").isNotNull(),
+                datediff(col("snapshot_date"), col("last_activity_date_as_of_snapshot")))
+            .otherwise(col("days_since_join_at_snapshot"))  # Use days since join if no activity
+        ).withColumn(
+            "has_any_historical_activity",
+            when(col("last_activity_date_as_of_snapshot").isNotNull(), 1).otherwise(0)
+        ).withColumn(
+            "churn_label_adjusted",
+            when(
+                # More nuanced new customer handling
+                (col("is_new_customer") == 1) & 
+                (col("has_any_historical_activity") == 0) &
+                (col("days_since_join_at_snapshot") <= 14),  # Very new customers
+                0  # Don't label as churn yet
+            ).when(
+                # Customers with some activity but very new
+                (col("is_new_customer") == 1) & 
+                (col("has_any_historical_activity") == 1) &
+                (col("days_since_last_activity") <= 45),  # Recent activity
+                0  # Don't label as churn yet
+            ).otherwise(col("churn_label"))
+        )
+        
+        return ml_features
     
     def create_ml_feature_store_comprehensive(self, customer_360: DataFrame, 
                                          transactions: DataFrame,
@@ -698,51 +670,115 @@ class CreditUnionFeatureEngineering:
         }
 
     def validate_pipeline_results(self, customer_360: DataFrame, ml_feature_store: DataFrame,
-                                expected_customers: int, expected_weeks: int) -> dict:
+                            expected_customers: int, expected_weeks: int) -> dict:
         """Validate pipeline results for data quality"""
         
         validation_results = {}
         
-        # Check record counts
-        c360_count = customer_360.count()
-        ml_count = ml_feature_store.count()
-        expected_records = expected_customers * expected_weeks
+        try:
+            # Check record counts
+            c360_count = customer_360.count()
+            ml_count = ml_feature_store.count()
+            expected_records = expected_customers * expected_weeks
+            
+            validation_results['record_count_check'] = {
+                'customer_360_count': c360_count,
+                'ml_feature_store_count': ml_count,
+                'expected_records': expected_records,
+                'count_reasonable': builtins.abs(c360_count - expected_records) < (expected_records * 0.1)
+            }
+            
+            # Check churn rate with safe handling
+            try:
+                churn_rate_result = ml_feature_store.agg(avg("churn_label")).collect()
+                if churn_rate_result and churn_rate_result[0] and churn_rate_result[0][0] is not None:
+                    churn_rate = churn_rate_result[0][0]
+                else:
+                    churn_rate = 0.0
+                    self.logger.warning("Could not calculate churn rate - using 0.0 as default")
+            except Exception as e:
+                churn_rate = 0.0
+                self.logger.warning(f"Error calculating churn rate: {e} - using 0.0 as default")
+            
+            validation_results['churn_rate_check'] = {
+                'churn_rate': churn_rate,
+                'reasonable_range': 0.02 <= churn_rate <= 0.20,  # 2-20% is typical
+                'warning': churn_rate > 0.30 or churn_rate < 0.01
+            }
+            
+            # Check for data leakage
+            future_features = [col for col in ml_feature_store.columns 
+                            if 'future' in col.lower() or 'after' in col.lower()]
+            validation_results['data_leakage_check'] = {
+                'suspicious_features': future_features,
+                'clean': len(future_features) == 0
+            }
+            
+            # Check snapshot date distribution
+            try:
+                snapshot_dates = ml_feature_store.select("snapshot_date").distinct().count()
+            except Exception as e:
+                snapshot_dates = 0
+                self.logger.warning(f"Error counting snapshot dates: {e}")
+            
+            validation_results['temporal_check'] = {
+                'unique_snapshot_dates': snapshot_dates,
+                'expected_dates': expected_weeks,
+                'reasonable': builtins.abs(snapshot_dates - expected_weeks) <= 2
+            }
+            
+            # Additional data quality checks
+            try:
+                # Check for null values in key columns
+                key_columns = ['customer_id', 'snapshot_date', 'churn_label']
+                null_counts = {}
+                for col_name in key_columns:
+                    if col_name in ml_feature_store.columns:
+                        null_count = ml_feature_store.filter(col(col_name).isNull()).count()
+                        null_counts[col_name] = null_count
+                
+                validation_results['data_quality_check'] = {
+                    'null_counts': null_counts,
+                    'has_nulls_in_key_columns': any(count > 0 for count in null_counts.values())
+                }
+            except Exception as e:
+                self.logger.warning(f"Error in data quality check: {e}")
+                validation_results['data_quality_check'] = {
+                    'null_counts': {},
+                    'has_nulls_in_key_columns': False,
+                    'error': str(e)
+                }
+            
+            # Check feature completeness
+            try:
+                feature_info = self.get_feature_columns_for_ml(ml_feature_store)
+                validation_results['feature_completeness_check'] = {
+                    'total_features': feature_info['total_features'],
+                    'feature_categories': {k: len(v) for k, v in feature_info['feature_categories'].items()},
+                    'has_minimum_features': feature_info['total_features'] >= 10
+                }
+            except Exception as e:
+                self.logger.warning(f"Error in feature completeness check: {e}")
+                validation_results['feature_completeness_check'] = {
+                    'total_features': 0,
+                    'feature_categories': {},
+                    'has_minimum_features': False,
+                    'error': str(e)
+                }
+            
+        except Exception as e:
+            self.logger.error(f"Critical error in validation: {e}")
+            validation_results['validation_error'] = {
+                'error': str(e),
+                'status': 'failed'
+            }
         
-        validation_results['record_count_check'] = {
-            'customer_360_count': c360_count,
-            'ml_feature_store_count': ml_count,
-            'expected_records': expected_records,
-            'count_reasonable': abs(c360_count - expected_records) < (expected_records * 0.1)
-        }
-        
-        # Check churn rate
-        churn_rate = ml_feature_store.agg(avg("churn_label")).collect()[0][0]
-        validation_results['churn_rate_check'] = {
-            'churn_rate': churn_rate,
-            'reasonable_range': 0.02 <= churn_rate <= 0.20,  # 2-20% is typical
-            'warning': churn_rate > 0.30 or churn_rate < 0.01
-        }
-        
-        # Check for data leakage
-        future_features = [col for col in ml_feature_store.columns 
-                        if 'future' in col.lower() or 'after' in col.lower()]
-        validation_results['data_leakage_check'] = {
-            'suspicious_features': future_features,
-            'clean': len(future_features) == 0
-        }
-        
-        # Check snapshot date distribution
-        snapshot_dates = ml_feature_store.select("snapshot_date").distinct().count()
-        validation_results['temporal_check'] = {
-            'unique_snapshot_dates': snapshot_dates,
-            'expected_dates': expected_weeks,
-            'reasonable': abs(snapshot_dates - expected_weeks) <= 2
-        }
+        return validation_results
 
 def run_unified_pipeline_enhanced(spark: SparkSession,
                         data_path: str = None,
-                        start_date: str = "2023-01-01",
-                        end_date: str = "2023-12-31",
+                        start_date: str = START_DATE,
+                        end_date: str = END_DATE - timedelta(days=30),
                         frequency_days: int = 7,
                         lookback_days: int = 90,
                         prediction_horizon_days: int = 30,
@@ -750,7 +786,7 @@ def run_unified_pipeline_enhanced(spark: SparkSession,
                         validate_results: bool = True,
                         **dataframes):
     """
-    Enhanced unified pipeline with validation and improved churn labeling
+    Enhanced pipeline with proper date handling to avoid early-year bias
     """
     
     print("=== Starting Enhanced Feature Engineering Pipeline ===")
@@ -764,9 +800,25 @@ def run_unified_pipeline_enhanced(spark: SparkSession,
     else:
         data_dict = fe.load_data(**dataframes)
     
-    # Convert date strings to datetime objects
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    # Parse strings or ensure all dates are datetime.datetime objects
+    start_dt = datetime.combine(start_date, datetime.min.time()) if isinstance(start_date, date) and not isinstance(start_date, datetime) else start_date
+    end_dt = datetime.combine(end_date, datetime.min.time()) if isinstance(end_date, date) and not isinstance(end_date, datetime) else end_date
+    
+    # CRITICAL FIX: Ensure we have enough future data for all snapshots
+    # Check the actual data range in your datasets
+    max_tx_date = data_dict['transactions'].agg(max("tx_date")).collect()[0][0]
+    max_int_date = data_dict['interactions'].agg(max("interaction_date")).collect()[0][0]
+    
+    # Use the earlier of the two max dates
+    actual_data_end = builtins.min(max_tx_date, max_int_date) if max_tx_date and max_int_date else (max_tx_date or max_int_date)
+    
+    if actual_data_end:
+        # Ensure we don't create snapshots too close to the end of available data
+        safe_end_date = actual_data_end - timedelta(days=prediction_horizon_days + 7)  # Extra buffer
+        safe_end_date = datetime.combine(safe_end_date, datetime.min.time()) if isinstance(safe_end_date, date) and not isinstance(safe_end_date, datetime) else safe_end_date
+        end_dt = builtins.min(end_dt, safe_end_date)
+        
+        print(f"Adjusted end date to {end_dt} to ensure {prediction_horizon_days} days of future data")
     
     # Calculate expected metrics
     expected_weeks = ((end_dt - start_dt).days // frequency_days) + 1
@@ -788,6 +840,28 @@ def run_unified_pipeline_enhanced(spark: SparkSession,
         data_dict['interactions'],
         prediction_horizon_days
     )
+    
+    # DEBUGGING: Add churn rate analysis by time period
+    print("\n=== Churn Rate Analysis by Time Period ===")
+    churn_by_month = ml_feature_store.withColumn(
+        "snapshot_month", date_format(col("snapshot_date"), "yyyy-MM")
+    ).groupBy("snapshot_month").agg(
+        count("*").alias("total_records"),
+        sum("churn_label").alias("churned_customers"),
+        avg("churn_label").alias("churn_rate")
+    ).orderBy("snapshot_month")
+    
+    churn_by_month.show(20, False)
+    
+    # Additional debugging: Check data availability
+    print("\n=== Data Availability Check ===")
+    data_range = ml_feature_store.agg(
+        min("snapshot_date").alias("min_snapshot"),
+        max("snapshot_date").alias("max_snapshot"),
+        min("prediction_end_date").alias("min_pred_end"),
+        max("prediction_end_date").alias("max_pred_end")
+    )
+    data_range.show(1, False)
     
     # Validate results
     if validate_results:
