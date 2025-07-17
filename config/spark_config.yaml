@@ -1,0 +1,9 @@
+app_name: "CustomerPropensityPipeline"
+
+configs:
+  spark.driver.memory: "12g"
+  spark.sql.adaptive.enabled: "true"
+  spark.sql.adaptive.coalescePartitions.enabled: "true"
+  spark.sql.adaptive.skewJoin.enabled: "true"
+  spark.sql.adaptive.localShuffleReader.enabled: "true"
+  spark.sql.autoBroadcastJoinThreshold: 36700160  # 35MB
