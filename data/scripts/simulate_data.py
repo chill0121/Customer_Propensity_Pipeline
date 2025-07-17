@@ -15,7 +15,7 @@ np.random.seed(42)  # Changed for reproducibility
 
 NUM_CUSTOMERS = 1000
 START_DATE = datetime(2023, 1, 1)
-END_DATE = datetime(2024, 12, 31)
+END_DATE = datetime(2025, 1, 31)
 PRODUCTS = ['checking', 'savings', 'credit_card', 'loan', 'debit']
 
 # Enhanced customer risk factors for churn
@@ -330,10 +330,6 @@ def generate_transactions(customers, avg_tx_per_customer=100):
                         tx_dates.append(tx_date)
             
             # Move to next month
-            # if current_date.month == 12:
-            #     current_date = current_date.replace(year=current_date.year + 1, month=1)
-            # else:
-            #     current_date = current_date.replace(month=current_date.month + 1)
             current_date += relativedelta(months=1)
         
         # Add random transactions between paychecks
