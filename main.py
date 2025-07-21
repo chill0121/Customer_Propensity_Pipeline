@@ -7,7 +7,7 @@
 DataIngestionService: Raw data ingestion and validation
 FeatureEngineeringService: Feature creation and snapshot generation
 ChurnLabelingService: Label generation and backfilling
-FeatureStoreService: Feature storage and retrieval
+FeatureStoreService: Feature storage and retrieval with metadata
 
 ### Weekly (Inference) Components
 ModelInferenceService: Real-time churn predictions
